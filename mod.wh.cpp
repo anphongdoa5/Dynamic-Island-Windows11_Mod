@@ -7605,6 +7605,8 @@ class Renderer {
         target_.Reset();
         textFormat_.Reset();
         smallTextFormat_.Reset();
+        clipboardPreviewFormat_.Reset();
+        clipboardPreviewEllipsis_.Reset();
         boldTextFormat_.Reset();
         hugeTextFormat_.Reset();
         clockFormat_.Reset();
@@ -7831,6 +7833,27 @@ class Renderer {
         createFormat(smallFamily, defaultSmall,
                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                      DWRITE_FONT_STRETCH_NORMAL, 11.0f * ts, smallTextFormat_);
+        createFormat(smallFamily, defaultSmall,
+                     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                     DWRITE_FONT_STRETCH_NORMAL, 11.0f * ts, clipboardPreviewFormat_);
+        if (clipboardPreviewFormat_) {
+            clipboardPreviewFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            clipboardPreviewFormat_->SetParagraphAlignment(
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            HRESULT hr = dwriteFactory_->CreateEllipsisTrimmingSign(
+                clipboardPreviewFormat_.Get(), &clipboardPreviewEllipsis_);
+            if (SUCCEEDED(hr) && clipboardPreviewEllipsis_) {
+                DWRITE_TRIMMING trimming = {};
+                trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+                hr = clipboardPreviewFormat_->SetTrimming(
+                    &trimming, clipboardPreviewEllipsis_.Get());
+            }
+            if (FAILED(hr)) {
+                Wh_Log(L"Could not enable ellipsis trimming for Clipboard previews (error 0x%08X).",
+                       static_cast<unsigned int>(hr));
+                clipboardPreviewEllipsis_.Reset();
+            }
+        }
         createFormat(mainFamily, defaultDisplay,
                      DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
                      DWRITE_FONT_STRETCH_NORMAL, 18.0f * ts, clockFormat_);
@@ -9613,13 +9636,14 @@ class Renderer {
             const D2D1_RECT_F textRect = D2D1::RectF(
                 row.left + 32.0f * scale, row.top,
                 row.right - actionW - 8.0f * scale, row.bottom);
-            if (smallTextFormat_) {
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            IDWriteTextFormat* previewFormat = clipboardPreviewFormat_
+                ? clipboardPreviewFormat_.Get()
+                : smallTextFormat_.Get();
+            if (previewFormat) {
                 textBrush_->SetOpacity(0.94f);
                 target_->DrawTextW(item.text.c_str(), static_cast<UINT32>(item.text.size()),
-                                   smallTextFormat_.Get(), textRect, textBrush_.Get(),
+                                   previewFormat, textRect, textBrush_.Get(),
                                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
             }
             const D2D1_RECT_F deleteRect = D2D1::RectF(
                 row.right - actionW, row.top, row.right, row.bottom);
@@ -11828,6 +11852,8 @@ class Renderer {
     ComPtr<IDWriteFactory> dwriteFactory_;
     ComPtr<IDWriteTextFormat> textFormat_;
     ComPtr<IDWriteTextFormat> smallTextFormat_;
+    ComPtr<IDWriteTextFormat> clipboardPreviewFormat_;
+    ComPtr<IDWriteInlineObject> clipboardPreviewEllipsis_;
     ComPtr<IDWriteTextFormat> boldTextFormat_;
     ComPtr<IDWriteTextFormat> hugeTextFormat_;
     ComPtr<IDWriteTextFormat> clockFormat_;
@@ -12862,7 +12888,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (haveItem && releasedOnSameButton &&
                         action == ClipboardRowAction::Copy) {
                         if (CopyClipboardHistoryItemToClipboard(hwnd, item)) {
-                            g_clipboardCopiedUntil = NowSeconds() + 2.0;
+                            g_clipboardCopiedUntil = NowSeconds() + 0.7;
                             g_layoutDirty = true;
                         }
                     } else if (haveItem && releasedOnSameButton &&
@@ -14299,7 +14325,7 @@ void Wh_ModAfterInit() {
         PHANDLE hRestrictedUserToken);
     CreateProcessInternalW_t pCreateProcessInternalW =
         (CreateProcessInternalW_t)GetProcAddress(kernelModule,
-                                                 "CreateProcessInternalW");
+                                                 "CreateProcessInternalW");                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;                                                g_clipboardCopiedUntil = NowSeconds() + 2.0;
     if (!pCreateProcessInternalW) {
         Wh_Log(L"No CreateProcessInternalW");
         return;
