@@ -49,15 +49,17 @@ The Dynamic Island intelligently expands to display context-aware dashboards. Yo
 - **Real Blur & Acrylic Backdrop:** Optionally paint genuine Windows blur or frosted acrylic behind the island so your desktop shows through it, exactly like the system's own surfaces.
 - **Translucent Backgrounds:** Hex colors accept an alpha channel (`#RRGGBBAA`), so you can make the island see-through while keeping text and icons perfectly crisp.
 - **Your Language:** The island's own labels follow your Windows display language across 12 languages, or you can pick one explicitly.
-- **File Tray:** Drag any file onto the island to park it on a shelf, drag it out to drop or paste into other software, or click to open it. Files are only referenced, never moved.
+- **File Tray:** Drag files onto the island to park them on a persistent, paginated shelf. Open or drag files out, or remove them with the trash icon. Files are only referenced, never moved.
+- **Clipboard History:** Browse up to 50 recent copied text snippets and image previews. Copy or delete entries from the paginated dashboard; the history is kept locally across restarts.
 - **Typography & Clock Control:** Scale all island text independently of the island's size, choose 12- or 24-hour time, show seconds, and set a custom date pattern — including CJK forms like `yyyy年MM月dd日`.
 
 ---
 
 ## ⚙️ Usage & Settings
 
-- **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between the Media, Calendar, Weather, Hardware Monitor, and File Tray tabs.
-- **File Tray:** Enable the File Tray module, then drag files onto the island. Click a row to open that file, drag a row out to drop/paste it directly into other software (Telegram, Discord, Photoshop, Explorer, browsers, etc.), or right-click to copy to clipboard or clear the shelf.
+- **Hover & Scroll:** Hover over the island to seamlessly expand it. Use your mouse scroll wheel to swipe between Media, File Tray, Clipboard History, Calendar, Weather and Hardware Monitor dashboards (optional modules are skipped).
+- **File Tray:** Enable the File Tray module, then drag files onto the island. Use the page arrows to browse every saved file, click a row to open it, drag a row out to drop/paste it directly into other software, or click its trash icon to remove it. The list survives restarts.
+- **Clipboard History:** The Clipboard module keeps up to 50 recent text copies and image previews. Open its dashboard from the scroll loop, then use the trash and copy icons on each row. Saved image entries restore their captured preview.
 - **Right-Click Menu:** Right-click the island to access Theme presets, Transparency settings, and to pin the island open.
 - **⚠️ Right-click choices are per-session:** The right-click menu is a quick way to try things out, not a place to configure the mod. **Theme**, **shape style** (Pill / Notch / Windows 11) and **pin open** are all re-applied from your Windhawk settings whenever the mod restarts — so a reboot, a mod update, or toggling the mod off and on will discard them. Anything you want to keep, set in the **Mod Settings** tab instead. (Transparency and Expand-on-hover do persist, but the settings tab is still the reliable place for them.)
 - **Windhawk Settings:** Visit the Mod Settings tab to change the island's Position, Size Scale, Refresh Rate (Target FPS), Animation Style (Smooth/Default/Bouncy/Snappy), Animation Speed, and toggle specific modules. You can also perfectly align the island using the `Offset X` and `Offset Y` settings, and select exactly which monitor the island should appear on (including a "Follow Mouse" mode!).
@@ -340,7 +342,7 @@ We love community contributions! To ensure high-quality updates, please follow t
     $description: Enables a Pomodoro-style focus/break timer, startable from the island's right-click menu.
   - Clipboard: true
     $name: Clipboard module
-    $description: Shows a quick preview of the text or images you just copied.
+    $description: Shows a quick preview of copied text or images and adds a persistent, paginated Clipboard History dashboard with copy and delete actions (up to 50 entries).
   - StatusCountdownProgress: false
     $name: Status countdown progress bar
     $description: Shows a subtle countdown progress bar at the bottom of temporary status alert cards (such as Clipboard, Notifications, and Device alerts). Disabled by default.
@@ -403,7 +405,7 @@ We love community contributions! To ensure high-quality updates, please follow t
     $description: Swap the idle dashboard so the date is the headline and the time sits beneath it.
   - FileTrayModule: false
     $name: File Tray (drag & drop shelf)
-    $description: Adds a File Tray card to the scroll loop. Drag files onto the island to park them there temporarily, drag them out to drop/paste into other software, click to open, or right-click to copy to clipboard or clear the shelf. Files are only referenced, never moved.
+    $description: Adds a persistent, paginated File Tray dashboard to the scroll loop. Drag files onto the island, click to open, drag out to drop/paste into other software, or use the trash icon to remove an entry. Files are only referenced, never moved.
   - FileTrayMaxItems: 10
     $name: File Tray capacity
     $description: 1 to 25. How many files the shelf keeps before the oldest one drops off.
@@ -494,6 +496,8 @@ We love community contributions! To ensure high-quality updates, please follow t
 #include <cwchar>
 #include <cstring>
 #include <mutex>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -598,9 +602,12 @@ namespace MediaLayout {
 namespace FileTrayLayout {
     constexpr float kPadX = 26.0f;
     constexpr float kListTop = 46.0f;
-    constexpr float kListBottomInset = 16.0f;
+    constexpr float kListBottomInset = 32.0f;
     constexpr float kRowHeight = 30.0f;
     constexpr float kRowGap = 6.0f;
+    constexpr float kPageButtonYInset = 18.0f;
+    constexpr float kPageButtonSpacing = 30.0f;
+    constexpr float kActionWidth = 24.0f;
 
     constexpr int VisibleRowCapacity(float contentHeight) {
         const float span = contentHeight - kListBottomInset - kListTop + kRowGap;
@@ -1173,6 +1180,12 @@ struct FileTrayItem {
     BitmapPixels icon;
 };
 
+struct ClipboardHistoryItem {
+    std::wstring text;
+    bool image = false;
+    BitmapPixels imagePreview;
+};
+
 struct SharedState {
     MediaSnapshot media;
     ClipboardSnapshot clipboard;
@@ -1191,6 +1204,8 @@ struct SharedState {
     size_t waveformWrite = 0;
     bool muted = false;
     std::vector<FileTrayItem> fileTrayItems;
+    std::shared_ptr<const std::vector<ClipboardHistoryItem>> clipboardHistory =
+        std::make_shared<const std::vector<ClipboardHistoryItem>>();
 };
 
 struct SpringValue {
@@ -1246,6 +1261,7 @@ Settings GetSettingsCopy() {
 
 std::mutex g_stateMutex;
 SharedState g_state;
+std::atomic<DWORD> g_pendingClipboardRestoreSequence = 0;
 std::atomic<uint64_t> g_artGenerationCounter = 0;
 
 HWND g_hwnd = nullptr;
@@ -1259,11 +1275,15 @@ HANDLE g_notificationThread = nullptr;
 HANDLE g_bluetoothThread = nullptr;
 std::atomic<bool> g_running = false;
 std::atomic<int> g_idleTab = 0;
+std::atomic<int> g_fileTrayPage = 0;
+std::atomic<int> g_clipboardHistoryPage = 0;
+std::atomic<double> g_clipboardCopiedUntil = 0.0;
 std::atomic<bool> g_layoutDirty = true;
 std::atomic<bool> g_clickExpanded = false;
 std::atomic<int> g_pressedMediaButton = -1;
 std::atomic<int> g_hoveredMediaButton = -1;
 std::atomic<int> g_hoveredFileTrayRow = -1;  // row index under the cursor on the File Tray card
+std::atomic<int> g_hoveredClipboardHistoryRow = -1;
 std::atomic<bool> g_scrubbing = false;           // true while press-dragging the media timeline scrubber
 std::atomic<float> g_scrubDragFraction = 0.0f;   // live 0..1 drag position while g_scrubbing is true
 std::atomic<double> g_lastLiveSeekTime = 0.0;    // throttle gate for live seeks while dragging
@@ -1324,9 +1344,10 @@ int ClampInt(int v, int lo, int hi) {
 // drifted out of sync.
 int ActiveTabCount(const Settings& settings) {
     int count = 2;  // primary (media or clock) + calendar
+    if (settings.fileTrayModule) ++count;
+    if (settings.clipboard) ++count;
     if (settings.weather) ++count;
     if (settings.hardwareMonitorModule) ++count;
-    if (settings.fileTrayModule) ++count;
     return count;
 }
 
@@ -1336,23 +1357,31 @@ int NormalizedTabIndex(const Settings& settings) {
     return ((raw % total) + total) % total;
 }
 
-// Tab order is always: primary, calendar, weather?, hardware?, file tray?
+// Tab order is: primary, Clipboard history?, File Tray?, calendar, weather?,
+// hardware monitor?.
 // The expensive GPU / network counters are only sampled while the hardware card
-// is actually on screen, so that check needs the card's real index rather than
-// assuming it is the last tab -- which stopped being true once the File Tray
-// was added after it.
+// is actually on screen, so that check needs the card's real index.
 int HardwareMonitorTabIndex(const Settings& settings) {
     if (!settings.hardwareMonitorModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0);
+    return 1 + (settings.fileTrayModule ? 1 : 0) +
+           (settings.clipboard ? 1 : 0) + 1 +
+           (settings.weather ? 1 : 0);
 }
 
 int FileTrayTabIndex(const Settings& settings) {
     if (!settings.fileTrayModule) {
         return -1;
     }
-    return 2 + (settings.weather ? 1 : 0) + (settings.hardwareMonitorModule ? 1 : 0);
+    return 1 + (settings.clipboard ? 1 : 0);
+}
+
+int ClipboardHistoryTabIndex(const Settings& settings) {
+    if (!settings.clipboard) {
+        return -1;
+    }
+    return 1;
 }
 
 // ── Localization (#35) ───────────────────────────────────────────────────────
@@ -1474,6 +1503,8 @@ const wchar_t* Loc(const wchar_t* english) {
         {L"Weather", {nullptr, L"Météo", L"Tiempo", L"Wetter", L"Tempo", L"Meteo", L"Погода", L"Hava", L"मौसम", L"天气", L"天気", L"날씨"}},
         {L"Hardware Monitor", {nullptr, L"Moniteur matériel", L"Monitor de hardware", L"Hardware-Monitor", L"Monitor de hardware", L"Monitor hardware", L"Монитор системы", L"Donanım İzleme", L"हार्डवेयर मॉनिटर", L"硬件监视器", L"ハードウェア モニター", L"하드웨어 모니터"}},
         {L"File Tray", {nullptr, L"Bac à fichiers", L"Bandeja de archivos", L"Dateiablage", L"Bandeja de arquivos", L"Vassoio file", L"Файлы", L"Dosya Tepsisi", L"फ़ाइल ट्रे", L"文件托盘", L"ファイル トレイ", L"파일 트레이"}},
+        {L"Clipboard", {nullptr, L"Presse-papiers", L"Portapapeles", L"Zwischenablage", L"Área de transferência", L"Appunti", L"Буфер обмена", L"Pano", L"क्लिपबोर्ड", L"剪贴板", L"クリップボード", L"클립보드"}},
+        {L"Clipboard is empty", {nullptr, L"Le presse-papiers est vide", L"El portapapeles está vacío", L"Zwischenablage ist leer", L"A área de transferência está vazia", L"Gli appunti sono vuoti", L"Буфер обмена пуст", L"Pano boş", L"क्लिपबोर्ड खाली है", L"剪贴板为空", L"クリップボードは空です", L"클립보드가 비어 있습니다"}},
         {L"Bluetooth", {nullptr, L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"Bluetooth", L"ब्लूटूथ", L"蓝牙", L"Bluetooth", L"블루투스"}},
         {L"Copied", {nullptr, L"Copié", L"Copiado", L"Kopiert", L"Copiado", L"Copiato", L"Скопировано", L"Kopyalandı", L"कॉपी किया गया", L"已复制", L"コピーしました", L"복사됨"}},
         {L"Volume", {nullptr, L"Volume", L"Volumen", L"Lautstärke", L"Volume", L"Volume", L"Громкость", L"Ses", L"वॉल्यूम", L"音量", L"音量", L"볼륨"}},
@@ -1643,9 +1674,39 @@ float MediaScrubFractionUnbounded(const MediaContentPoint& pt) {
     return Clamp((Clamp(pt.x, barLeft, barRight) - barLeft) / (barRight - barLeft), 0.0f, 1.0f);
 }
 
-// Index of the File Tray row under a content-space point, or -1. Rows are drawn
-// newest-first, so index 0 is the most recently dropped file.
-int FileTrayRowAtContentPoint(const MediaContentPoint& pt, int itemCount) {
+int ListPageCount(int itemCount, float contentHeight) {
+    const int capacity = FileTrayLayout::VisibleRowCapacity(contentHeight);
+    return std::max(1, (itemCount + capacity - 1) / capacity);
+}
+
+int ListPageButtonAtContentPoint(const MediaContentPoint& pt, int itemCount,
+                                 int currentPage) {
+    if (!pt.valid || itemCount <= 0 ||
+        pt.height <= MediaLayout::kExpandedMinHeight) {
+        return 0;
+    }
+
+    const float buttonY = pt.height - FileTrayLayout::kPageButtonYInset;
+    if (std::fabs(pt.y - buttonY) > 11.0f) {
+        return 0;
+    }
+
+    const float centerX = pt.width * 0.5f;
+    const float buttonHalfWidth = 12.0f;
+    const float previousX = centerX - FileTrayLayout::kPageButtonSpacing;
+    const float nextX = centerX + FileTrayLayout::kPageButtonSpacing;
+    if (std::fabs(pt.x - previousX) <= buttonHalfWidth) {
+        return currentPage > 0 ? -1 : -2;
+    }
+    if (std::fabs(pt.x - nextX) <= buttonHalfWidth) {
+        return currentPage + 1 < ListPageCount(itemCount, pt.height) ? 1 : -2;
+    }
+    return 0;
+}
+
+// Index of a visible list row under a content-space point, or -1. Rows are
+// drawn newest-first; page zero contains the newest items.
+int ListRowAtContentPoint(const MediaContentPoint& pt, int itemCount, int page) {
     if (!pt.valid || itemCount <= 0 || pt.height <= MediaLayout::kExpandedMinHeight) {
         return -1;
     }
@@ -1667,10 +1728,40 @@ int FileTrayRowAtContentPoint(const MediaContentPoint& pt, int itemCount) {
     }
 
     const int capacity = FileTrayLayout::VisibleRowCapacity(pt.height);
-    if (index < 0 || index >= capacity || index >= itemCount) {
+    const int pageCount = ListPageCount(itemCount, pt.height);
+    if (page < 0 || page >= pageCount || index < 0 || index >= capacity ||
+        page * capacity + index >= itemCount) {
         return -1;
     }
     return index;
+}
+
+int FileTrayRowAtContentPoint(const MediaContentPoint& pt, int itemCount, int page) {
+    return ListRowAtContentPoint(pt, itemCount, page);
+}
+
+enum class ClipboardRowAction {
+    None,
+    Delete,
+    Copy,
+};
+
+ClipboardRowAction ClipboardRowActionAtContentPoint(const MediaContentPoint& pt,
+                                                     int itemCount, int page) {
+    const int row = ListRowAtContentPoint(pt, itemCount, page);
+    if (row < 0) {
+        return ClipboardRowAction::None;
+    }
+
+    const float right = pt.width - FileTrayLayout::kPadX;
+    if (pt.x >= right - FileTrayLayout::kActionWidth) {
+        return ClipboardRowAction::Delete;
+    }
+    return ClipboardRowAction::Copy;
+}
+
+size_t NewestFirstItemIndex(size_t itemCount, int page, int row, int capacity) {
+    return itemCount - 1 - static_cast<size_t>(page * capacity + row);
 }
 
 // ── File Tray: OLE drag-out support ──────────────────────────────────────────
@@ -3341,6 +3432,346 @@ bool IconToPixels(HICON icon, UINT size, BitmapPixels* outPixels) {
     DeleteDC(dc);
     return true;
 }
+
+namespace {
+
+constexpr DWORD kPersistedDataVersion = 1;
+constexpr size_t kMaxPersistedFileBytes = 16 * 1024 * 1024;
+constexpr size_t kClipboardHistoryMaxItems = 50;
+constexpr size_t kClipboardHistoryMaxTextChars = 65536;
+constexpr UINT kClipboardHistoryImageMaxDim = kClipboardImageThumbMaxDim;
+
+bool PersistenceFilePath(const wchar_t* fileName, std::wstring* path) {
+    wchar_t localAppData[MAX_PATH] = {};
+    const HRESULT hr = SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE,
+                                         nullptr, SHGFP_TYPE_CURRENT, localAppData);
+    if (FAILED(hr)) {
+        Wh_Log(L"Could not resolve Local AppData for persistent lists (0x%08X).", hr);
+        return false;
+    }
+
+    const std::wstring directory = std::wstring(localAppData) + L"\\DynamicIslandWindowsMod";
+    if (!CreateDirectoryW(directory.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        Wh_Log(L"Could not create persistent data directory (error %lu).", GetLastError());
+        return false;
+    }
+    *path = directory + L"\\" + fileName;
+    return true;
+}
+
+void AppendPersistedDword(std::vector<uint8_t>* bytes, DWORD value) {
+    const auto* data = reinterpret_cast<const uint8_t*>(&value);
+    bytes->insert(bytes->end(), data, data + sizeof(value));
+}
+
+void AppendPersistedWideString(std::vector<uint8_t>* bytes, const std::wstring& value) {
+    AppendPersistedDword(bytes, static_cast<DWORD>(value.size()));
+    const auto* data = reinterpret_cast<const uint8_t*>(value.data());
+    bytes->insert(bytes->end(), data, data + value.size() * sizeof(wchar_t));
+}
+
+bool ReadPersistedDword(const std::vector<uint8_t>& bytes, size_t* offset, DWORD* value) {
+    if (*offset > bytes.size() || bytes.size() - *offset < sizeof(*value)) {
+        return false;
+    }
+    memcpy(value, bytes.data() + *offset, sizeof(*value));
+    *offset += sizeof(*value);
+    return true;
+}
+
+bool ReadPersistedWideString(const std::vector<uint8_t>& bytes, size_t* offset,
+                             std::wstring* value, size_t maxChars) {
+    DWORD chars = 0;
+    if (!ReadPersistedDword(bytes, offset, &chars) || chars > maxChars ||
+        *offset > bytes.size() ||
+        static_cast<size_t>(chars) > (bytes.size() - *offset) / sizeof(wchar_t)) {
+        return false;
+    }
+    value->assign(reinterpret_cast<const wchar_t*>(bytes.data() + *offset), chars);
+    *offset += static_cast<size_t>(chars) * sizeof(wchar_t);
+    return true;
+}
+
+bool ReadPersistedFile(const wchar_t* fileName, std::vector<uint8_t>* bytes) {
+    std::wstring path;
+    if (!PersistenceFilePath(fileName, &path)) {
+        return false;
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND) {
+            return true;
+        }
+        Wh_Log(L"Could not open persistent data file %s (error %lu).",
+               fileName, GetLastError());
+        return false;
+    }
+
+    LARGE_INTEGER size = {};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        static_cast<uint64_t>(size.QuadPart) > kMaxPersistedFileBytes) {
+        Wh_Log(L"Persistent data file %s has an invalid size.", fileName);
+        CloseHandle(file);
+        return false;
+    }
+
+    bytes->resize(static_cast<size_t>(size.QuadPart));
+    DWORD bytesRead = 0;
+    const DWORD expected = static_cast<DWORD>(bytes->size());
+    const BOOL readOk = expected == 0 ||
+                        ReadFile(file, bytes->data(), expected, &bytesRead, nullptr);
+    DWORD readError = ERROR_SUCCESS;
+    if (!readOk) {
+        readError = GetLastError();
+    } else if (bytesRead != expected) {
+        readError = ERROR_HANDLE_EOF;
+    }
+    CloseHandle(file);
+    if (!readOk || bytesRead != expected) {
+        Wh_Log(L"Could not read persistent data file %s (error %lu).",
+               fileName, readError);
+        bytes->clear();
+        return false;
+    }
+    return true;
+}
+
+bool WritePersistedFile(const wchar_t* fileName, const std::vector<uint8_t>& bytes) {
+    if (bytes.size() > kMaxPersistedFileBytes) {
+        Wh_Log(L"Persistent data file %s exceeds the supported size.", fileName);
+        return false;
+    }
+
+    std::wstring path;
+    if (!PersistenceFilePath(fileName, &path)) {
+        return false;
+    }
+    const std::wstring temporaryPath = path + L".tmp";
+    HANDLE file = CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        Wh_Log(L"Could not create persistent data file %s (error %lu).",
+               fileName, GetLastError());
+        return false;
+    }
+
+    DWORD bytesWritten = 0;
+    const DWORD expected = static_cast<DWORD>(bytes.size());
+    const BOOL writeOk = expected == 0 ||
+                         WriteFile(file, bytes.data(), expected, &bytesWritten, nullptr);
+    DWORD writeError = ERROR_SUCCESS;
+    if (!writeOk) {
+        writeError = GetLastError();
+    } else if (bytesWritten != expected) {
+        writeError = ERROR_WRITE_FAULT;
+    } else if (!FlushFileBuffers(file)) {
+        writeError = GetLastError();
+    }
+    const BOOL flushOk = writeError == ERROR_SUCCESS;
+    CloseHandle(file);
+    if (!flushOk || !MoveFileExW(temporaryPath.c_str(), path.c_str(),
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const DWORD error = GetLastError();
+        DeleteFileW(temporaryPath.c_str());
+        Wh_Log(L"Could not save persistent data file %s (error %lu).",
+               fileName, flushOk ? error : writeError);
+        return false;
+    }
+    return true;
+}
+
+bool ReadPersistedHeader(const std::vector<uint8_t>& bytes, DWORD expectedMagic,
+                         size_t* offset, DWORD* count) {
+    DWORD magic = 0;
+    DWORD version = 0;
+    return ReadPersistedDword(bytes, offset, &magic) &&
+           ReadPersistedDword(bytes, offset, &version) &&
+           ReadPersistedDword(bytes, offset, count) &&
+           magic == expectedMagic && version == kPersistedDataVersion;
+}
+
+void AppendPersistedHeader(std::vector<uint8_t>* bytes, DWORD magic, DWORD count) {
+    AppendPersistedDword(bytes, magic);
+    AppendPersistedDword(bytes, kPersistedDataVersion);
+    AppendPersistedDword(bytes, count);
+}
+
+bool LoadPersistentLists() {
+    std::vector<uint8_t> bytes;
+    if (!ReadPersistedFile(L"file-tray.dat", &bytes)) {
+        return false;
+    }
+    std::vector<FileTrayItem> files;
+    if (!bytes.empty()) {
+        size_t offset = 0;
+        DWORD count = 0;
+        if (!ReadPersistedHeader(bytes, 0x46545259, &offset, &count) || count > 25) {
+            Wh_Log(L"Persistent File Tray data is invalid; ignoring it.");
+            return false;
+        }
+        for (DWORD i = 0; i < count; ++i) {
+            std::wstring path;
+            if (!ReadPersistedWideString(bytes, &offset, &path, 32767) || path.empty()) {
+                Wh_Log(L"Persistent File Tray data is truncated; ignoring it.");
+                return false;
+            }
+
+            FileTrayItem item;
+            item.path = std::move(path);
+            const size_t separator = item.path.find_last_of(L"\\/");
+            item.name = separator == std::wstring::npos ? item.path
+                                                         : item.path.substr(separator + 1);
+            WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+            if (GetFileAttributesExW(item.path.c_str(), GetFileExInfoStandard, &attributes)) {
+                item.isDirectory = (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                item.sizeBytes = (static_cast<uint64_t>(attributes.nFileSizeHigh) << 32) |
+                                 attributes.nFileSizeLow;
+            }
+            SHFILEINFOW info = {};
+            if (SHGetFileInfoW(item.path.c_str(), 0, &info, sizeof(info),
+                               SHGFI_ICON | SHGFI_SMALLICON) && info.hIcon) {
+                IconToPixels(info.hIcon, 32, &item.icon);
+                DestroyIcon(info.hIcon);
+            }
+            files.push_back(std::move(item));
+        }
+        if (offset != bytes.size()) {
+            Wh_Log(L"Persistent File Tray data has trailing bytes; ignoring it.");
+            return false;
+        }
+        const size_t capacity = static_cast<size_t>(std::max(1, g_settings.fileTrayMaxItems));
+        if (files.size() > capacity) {
+            files.erase(files.begin(), files.end() - capacity);
+        }
+    }
+
+    bytes.clear();
+    if (!ReadPersistedFile(L"clipboard-history.dat", &bytes)) {
+        return false;
+    }
+    std::vector<ClipboardHistoryItem> clipboardItems;
+    if (!bytes.empty()) {
+        size_t offset = 0;
+        DWORD count = 0;
+        if (!ReadPersistedHeader(bytes, 0x434C4950, &offset, &count) ||
+            count > kClipboardHistoryMaxItems) {
+            Wh_Log(L"Persistent Clipboard history data is invalid; ignoring it.");
+            return false;
+        }
+        for (DWORD i = 0; i < count; ++i) {
+            DWORD image = 0;
+            ClipboardHistoryItem item;
+            if (!ReadPersistedDword(bytes, &offset, &image) || image > 1 ||
+                !ReadPersistedWideString(bytes, &offset, &item.text,
+                                         kClipboardHistoryMaxTextChars)) {
+                Wh_Log(L"Persistent Clipboard history data is truncated; ignoring it.");
+                return false;
+            }
+            item.image = image != 0;
+            DWORD width = 0;
+            DWORD height = 0;
+            DWORD pixelBytes = 0;
+            if (!ReadPersistedDword(bytes, &offset, &width) ||
+                !ReadPersistedDword(bytes, &offset, &height) ||
+                !ReadPersistedDword(bytes, &offset, &pixelBytes)) {
+                Wh_Log(L"Persistent Clipboard image data is truncated; ignoring it.");
+                return false;
+            }
+            if (item.image) {
+                const uint64_t expected = static_cast<uint64_t>(width) * height * 4;
+                if (width == 0 || height == 0 ||
+                    width > kClipboardHistoryImageMaxDim ||
+                    height > kClipboardHistoryImageMaxDim ||
+                    expected != pixelBytes || expected > bytes.size() - offset) {
+                    Wh_Log(L"Persistent Clipboard image data is invalid; ignoring it.");
+                    return false;
+                }
+                item.imagePreview.width = width;
+                item.imagePreview.height = height;
+                item.imagePreview.bgra.assign(bytes.begin() + offset,
+                                               bytes.begin() + offset + pixelBytes);
+                offset += pixelBytes;
+            } else if (width != 0 || height != 0 || pixelBytes != 0) {
+                Wh_Log(L"Persistent Clipboard text entry has invalid image data.");
+                return false;
+            }
+            clipboardItems.push_back(std::move(item));
+        }
+        if (offset != bytes.size()) {
+            Wh_Log(L"Persistent Clipboard history has trailing bytes; ignoring it.");
+            return false;
+        }
+    }
+
+    {
+        std::lock_guard lock(g_stateMutex);
+        g_state.fileTrayItems = std::move(files);
+        g_state.clipboardHistory =
+            std::make_shared<const std::vector<ClipboardHistoryItem>>(
+                std::move(clipboardItems));
+    }
+    return true;
+}
+
+bool PersistFileTrayItems(const std::vector<FileTrayItem>& items) {
+    std::vector<uint8_t> bytes;
+    AppendPersistedHeader(&bytes, 0x46545259, static_cast<DWORD>(items.size()));
+    for (const FileTrayItem& item : items) {
+        AppendPersistedWideString(&bytes, item.path);
+    }
+    return WritePersistedFile(L"file-tray.dat", bytes);
+}
+
+bool PersistClipboardHistory(const std::vector<ClipboardHistoryItem>& items) {
+    std::vector<uint8_t> bytes;
+    AppendPersistedHeader(&bytes, 0x434C4950, static_cast<DWORD>(items.size()));
+    for (const ClipboardHistoryItem& item : items) {
+        AppendPersistedDword(&bytes, item.image ? 1 : 0);
+        AppendPersistedWideString(&bytes, item.text);
+        const UINT width = item.image ? item.imagePreview.width : 0;
+        const UINT height = item.image ? item.imagePreview.height : 0;
+        const size_t expectedPixels = static_cast<size_t>(width) * height * 4;
+        if (expectedPixels != item.imagePreview.bgra.size()) {
+            Wh_Log(L"Skipping persistence of Clipboard history: invalid image data.");
+            return false;
+        }
+        AppendPersistedDword(&bytes, width);
+        AppendPersistedDword(&bytes, height);
+        AppendPersistedDword(&bytes, static_cast<DWORD>(expectedPixels));
+        bytes.insert(bytes.end(), item.imagePreview.bgra.begin(),
+                     item.imagePreview.bgra.end());
+    }
+    return WritePersistedFile(L"clipboard-history.dat", bytes);
+}
+
+void EnforceFileTrayCapacity() {
+    const Settings settings = GetSettingsCopy();
+    std::vector<FileTrayItem> items;
+    bool changed = false;
+    {
+        std::lock_guard lock(g_stateMutex);
+        const size_t capacity = static_cast<size_t>(
+            std::max(1, settings.fileTrayMaxItems));
+        if (g_state.fileTrayItems.size() > capacity) {
+            g_state.fileTrayItems.erase(
+                g_state.fileTrayItems.begin(),
+                g_state.fileTrayItems.end() - capacity);
+            changed = true;
+        }
+        if (changed) {
+            items = g_state.fileTrayItems;
+        }
+    }
+    if (changed) {
+        PersistFileTrayItems(items);
+        g_fileTrayPage = 0;
+    }
+}
+
+}  // namespace
 
 bool ProcessImageNameForPid(DWORD pid, std::wstring* imageName) {
     if (!pid || !imageName) {
@@ -6091,7 +6522,8 @@ void CaptureClipboard(HWND hwnd) {
         }
     }
 
-    std::wstring text = ReadClipboardText(hwnd);
+    const std::wstring copiedText = ReadClipboardText(hwnd);
+    std::wstring text = copiedText;
     if (!text.empty()) {
         constexpr size_t maxChars = 96;
         std::replace(text.begin(), text.end(), L'\r', L' ');
@@ -6113,12 +6545,181 @@ void CaptureClipboard(HWND hwnd) {
         }
     }
 
-    if (clip.active) {
-        {
-            std::lock_guard lock(g_stateMutex);
-            g_state.clipboard = std::move(clip);
+    DWORD pendingSequence = g_pendingClipboardRestoreSequence.load(
+        std::memory_order_relaxed);
+    if (pendingSequence != 0) {
+        const bool isHistoryRestore =
+            GetClipboardSequenceNumber() == pendingSequence;
+        g_pendingClipboardRestoreSequence.compare_exchange_strong(
+            pendingSequence, 0, std::memory_order_relaxed);
+        if (isHistoryRestore) {
+            return;
         }
     }
+
+    if (clip.active) {
+        ClipboardHistoryItem historyItem;
+        bool retainInHistory = true;
+        if (!copiedText.empty()) {
+            if (copiedText.size() > kClipboardHistoryMaxTextChars) {
+                Wh_Log(L"Clipboard content exceeds the history limit (%zu characters); "
+                       L"it will only be shown in the temporary alert.",
+                       kClipboardHistoryMaxTextChars);
+                retainInHistory = false;
+            } else {
+                historyItem.text = copiedText;
+            }
+        } else if (clip.image) {
+            historyItem.text = clip.text;
+            historyItem.image = true;
+            historyItem.imagePreview = clip.imagePreview;
+        }
+
+        std::shared_ptr<const std::vector<ClipboardHistoryItem>> historyToPersist;
+        {
+            std::lock_guard lock(g_stateMutex);
+            g_state.clipboard = clip;
+            if (retainInHistory) {
+                const auto& history = *g_state.clipboardHistory;
+                const bool duplicate = !history.empty() &&
+                    history.back().text == historyItem.text &&
+                    history.back().image == historyItem.image &&
+                    (!historyItem.image ||
+                     (history.back().imagePreview.width ==
+                          historyItem.imagePreview.width &&
+                      history.back().imagePreview.height ==
+                          historyItem.imagePreview.height &&
+                      history.back().imagePreview.bgra ==
+                          historyItem.imagePreview.bgra));
+                if (!duplicate) {
+                    auto updatedHistory =
+                        std::make_shared<std::vector<ClipboardHistoryItem>>(history);
+                    updatedHistory->push_back(std::move(historyItem));
+                    while (updatedHistory->size() > kClipboardHistoryMaxItems) {
+                        updatedHistory->erase(updatedHistory->begin());
+                    }
+                    g_state.clipboardHistory = updatedHistory;
+                    historyToPersist = std::move(updatedHistory);
+                }
+            }
+        }
+        if (historyToPersist && !historyToPersist->empty()) {
+            PersistClipboardHistory(*historyToPersist);
+            g_clipboardHistoryPage = 0;
+            g_hoveredClipboardHistoryRow = -1;
+            g_layoutDirty = true;
+        }
+    }
+}
+
+bool CopyClipboardHistoryItemToClipboard(HWND hwnd, const ClipboardHistoryItem& item) {
+    if (!OpenClipboard(hwnd)) {
+        Wh_Log(L"Could not open the Clipboard to restore a history item (error %lu).",
+               GetLastError());
+        return false;
+    }
+
+    HANDLE clipboardData = nullptr;
+    UINT format = CF_UNICODETEXT;
+    if (item.image) {
+        const size_t pixelBytes = item.imagePreview.bgra.size();
+        const size_t expectedBytes = static_cast<size_t>(item.imagePreview.width) *
+                                     item.imagePreview.height * 4;
+        if (item.imagePreview.width == 0 || item.imagePreview.height == 0 ||
+            pixelBytes != expectedBytes ||
+            item.imagePreview.width > kClipboardHistoryImageMaxDim ||
+            item.imagePreview.height > kClipboardHistoryImageMaxDim ||
+            pixelBytes > std::numeric_limits<DWORD>::max()) {
+            CloseClipboard();
+            Wh_Log(L"Could not restore Clipboard history item: image data is invalid.");
+            return false;
+        }
+
+        const size_t dibBytes = sizeof(BITMAPINFOHEADER) + pixelBytes;
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, dibBytes);
+        if (!memory) {
+            CloseClipboard();
+            Wh_Log(L"Could not allocate memory for the Clipboard image (error %lu).",
+                   GetLastError());
+            return false;
+        }
+        auto* dib = static_cast<uint8_t*>(GlobalLock(memory));
+        if (!dib) {
+            GlobalFree(memory);
+            CloseClipboard();
+            Wh_Log(L"Could not lock memory for the Clipboard image (error %lu).",
+                   GetLastError());
+            return false;
+        }
+        BITMAPINFOHEADER header = {};
+        header.biSize = sizeof(header);
+        header.biWidth = static_cast<LONG>(item.imagePreview.width);
+        header.biHeight = -static_cast<LONG>(item.imagePreview.height);
+        header.biPlanes = 1;
+        header.biBitCount = 32;
+        header.biCompression = BI_RGB;
+        header.biSizeImage = static_cast<DWORD>(pixelBytes);
+        memcpy(dib, &header, sizeof(header));
+        memcpy(dib + sizeof(header), item.imagePreview.bgra.data(), pixelBytes);
+        uint8_t* pixels = dib + sizeof(header);
+        for (size_t i = 0; i < pixelBytes; i += 4) {
+            const uint8_t alpha = pixels[i + 3];
+            if (alpha == 0) {
+                pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+            } else if (alpha < 255) {
+                pixels[i] = static_cast<uint8_t>(std::min(
+                    255, pixels[i] * 255 / alpha));
+                pixels[i + 1] = static_cast<uint8_t>(std::min(
+                    255, pixels[i + 1] * 255 / alpha));
+                pixels[i + 2] = static_cast<uint8_t>(std::min(
+                    255, pixels[i + 2] * 255 / alpha));
+            }
+        }
+        GlobalUnlock(memory);
+        clipboardData = memory;
+        format = CF_DIB;
+    } else {
+        const size_t bytes = (item.text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory) {
+            CloseClipboard();
+            Wh_Log(L"Could not allocate memory for the Clipboard text (error %lu).",
+                   GetLastError());
+            return false;
+        }
+        auto* text = static_cast<wchar_t*>(GlobalLock(memory));
+        if (!text) {
+            GlobalFree(memory);
+            CloseClipboard();
+            Wh_Log(L"Could not lock memory for the Clipboard text (error %lu).",
+                   GetLastError());
+            return false;
+        }
+        memcpy(text, item.text.c_str(), bytes);
+        GlobalUnlock(memory);
+        clipboardData = memory;
+    }
+
+    if (!EmptyClipboard()) {
+        const DWORD error = GetLastError();
+        GlobalFree(clipboardData);
+        CloseClipboard();
+        Wh_Log(L"Could not clear the Clipboard before restoring an item (error %lu).",
+               error);
+        return false;
+    }
+    const bool setOk = SetClipboardData(format, clipboardData) != nullptr;
+    const DWORD error = GetLastError();
+    if (!setOk) {
+        GlobalFree(clipboardData);
+    }
+    CloseClipboard();
+    if (!setOk) {
+        Wh_Log(L"Could not restore a Clipboard history item (error %lu).", error);
+        return false;
+    }
+    g_pendingClipboardRestoreSequence = GetClipboardSequenceNumber();
+    return true;
 }
 
 void SetClickThrough(HWND hwnd, bool clickThrough) {
@@ -6505,16 +7106,25 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
     }
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(timerMenu), L"Focus Timer");
 
-    int hoveredTrayRow = g_hoveredFileTrayRow.load(std::memory_order_relaxed);
     std::wstring hoveredTrayFilePath;
     std::wstring hoveredTrayFileName;
     if (g_settings.fileTrayModule) {
         size_t trayCount = 0;
+        POINT clientPoint = screenPoint;
+        ScreenToClient(hwnd, &clientPoint);
+        const MediaContentPoint contentPoint =
+            MediaContentFromClient(clientPoint.x, clientPoint.y);
+        const int page = g_fileTrayPage.load(std::memory_order_relaxed);
+        int hoveredTrayRow = -1;
         {
             std::lock_guard lock(g_stateMutex);
             trayCount = g_state.fileTrayItems.size();
-            if (hoveredTrayRow >= 0 && hoveredTrayRow < static_cast<int>(trayCount)) {
-                size_t idx = trayCount - 1 - static_cast<size_t>(hoveredTrayRow);
+            hoveredTrayRow = FileTrayRowAtContentPoint(
+                contentPoint, static_cast<int>(trayCount), page);
+            if (hoveredTrayRow >= 0) {
+                const int capacity = FileTrayLayout::VisibleRowCapacity(contentPoint.height);
+                const size_t idx = trayCount - 1 -
+                    static_cast<size_t>(page * capacity + hoveredTrayRow);
                 hoveredTrayFilePath = g_state.fileTrayItems[idx].path;
                 hoveredTrayFileName = g_state.fileTrayItems[idx].name;
             }
@@ -6728,10 +7338,14 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
         case 41: {
             // Clear the File Tray. Only the island's references are dropped --
             // nothing on disk is touched.
+            std::vector<FileTrayItem> files;
             {
                 std::lock_guard lock(g_stateMutex);
                 g_state.fileTrayItems.clear();
+                files = g_state.fileTrayItems;
             }
+            PersistFileTrayItems(files);
+            g_fileTrayPage = 0;
             g_hoveredFileTrayRow = -1;
             g_layoutDirty = true;
             break;
@@ -6746,12 +7360,17 @@ void ShowContextMenu(HWND hwnd, POINT screenPoint) {
         case 43: {
             // Remove single file from tray
             if (!hoveredTrayFilePath.empty()) {
-                std::lock_guard lock(g_stateMutex);
-                auto it = std::find_if(g_state.fileTrayItems.begin(), g_state.fileTrayItems.end(),
-                                       [&](const FileTrayItem& item) { return item.path == hoveredTrayFilePath; });
-                if (it != g_state.fileTrayItems.end()) {
-                    g_state.fileTrayItems.erase(it);
+                std::vector<FileTrayItem> files;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    auto it = std::find_if(g_state.fileTrayItems.begin(), g_state.fileTrayItems.end(),
+                                           [&](const FileTrayItem& item) { return item.path == hoveredTrayFilePath; });
+                    if (it != g_state.fileTrayItems.end()) {
+                        g_state.fileTrayItems.erase(it);
+                    }
+                    files = g_state.fileTrayItems;
                 }
+                PersistFileTrayItems(files);
             }
             g_hoveredFileTrayRow = -1;
             g_layoutDirty = true;
@@ -8632,6 +9251,106 @@ class Renderer {
         mutedBrush_->SetOpacity(0.75f);
     }
 
+    void DrawTrashIcon(D2D1_RECT_F rect, ID2D1Brush* brush, float scale) {
+        if (!brush) {
+            return;
+        }
+        const float cx = (rect.left + rect.right) * 0.5f;
+        const float top = (rect.top + rect.bottom) * 0.5f - 6.0f * scale;
+        const float left = cx - 4.5f * scale;
+        const float right = cx + 4.5f * scale;
+        const float bottom = top + 12.0f * scale;
+        const float stroke = 1.5f * scale;
+        target_->DrawLine(D2D1::Point2F(cx - 2.0f * scale, top - 1.5f * scale),
+                          D2D1::Point2F(cx + 2.0f * scale, top - 1.5f * scale),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(left - 1.0f * scale, top + 1.0f * scale),
+                          D2D1::Point2F(right + 1.0f * scale, top + 1.0f * scale),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(left, top + 2.0f * scale),
+                          D2D1::Point2F(left + 1.0f * scale, bottom),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(right, top + 2.0f * scale),
+                          D2D1::Point2F(right - 1.0f * scale, bottom),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(left + 1.0f * scale, bottom),
+                          D2D1::Point2F(right - 1.0f * scale, bottom),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(cx - 1.5f * scale, top + 4.0f * scale),
+                          D2D1::Point2F(cx - 1.5f * scale, bottom - 2.0f * scale),
+                          brush, stroke);
+        target_->DrawLine(D2D1::Point2F(cx + 1.5f * scale, top + 4.0f * scale),
+                          D2D1::Point2F(cx + 1.5f * scale, bottom - 2.0f * scale),
+                          brush, stroke);
+    }
+
+    void DrawClipboardItemIcon(D2D1_RECT_F rect, bool image, float scale) {
+        if (!accentBrush_) {
+            return;
+        }
+        const float left = rect.left + 2.0f * scale;
+        const float top = rect.top + 2.0f * scale;
+        const float right = rect.right - 2.0f * scale;
+        const float bottom = rect.bottom - 2.0f * scale;
+        const float stroke = 1.4f * scale;
+        const D2D1_RECT_F page = D2D1::RectF(left, top, right, bottom);
+        accentBrush_->SetOpacity(0.88f);
+        target_->DrawRoundedRectangle(
+            D2D1::RoundedRect(page, 2.0f * scale, 2.0f * scale),
+            accentBrush_.Get(), stroke);
+        if (image) {
+            const D2D1_RECT_F picture = D2D1::RectF(
+                left + 2.0f * scale, top + 3.0f * scale,
+                right - 2.0f * scale, bottom - 2.0f * scale);
+            target_->DrawRoundedRectangle(
+                D2D1::RoundedRect(picture, 1.0f * scale, 1.0f * scale),
+                accentBrush_.Get(), stroke);
+            target_->DrawEllipse(
+                D2D1::Ellipse(D2D1::Point2F(right - 5.0f * scale,
+                                             top + 6.0f * scale),
+                              1.0f * scale, 1.0f * scale),
+                accentBrush_.Get(), stroke);
+            target_->DrawLine(D2D1::Point2F(left + 3.0f * scale,
+                                             bottom - 4.0f * scale),
+                              D2D1::Point2F(left + 6.0f * scale,
+                                             bottom - 7.0f * scale),
+                              accentBrush_.Get(), stroke);
+            target_->DrawLine(D2D1::Point2F(left + 6.0f * scale,
+                                             bottom - 7.0f * scale),
+                              D2D1::Point2F(left + 10.0f * scale,
+                                             bottom - 3.0f * scale),
+                              accentBrush_.Get(), stroke);
+            target_->DrawLine(D2D1::Point2F(left + 8.0f * scale,
+                                             bottom - 5.0f * scale),
+                              D2D1::Point2F(right - 2.0f * scale,
+                                             bottom - 8.0f * scale),
+                              accentBrush_.Get(), stroke);
+        } else {
+            for (int line = 0; line < 3; ++line) {
+                const float y = top + (6.0f + line * 3.5f) * scale;
+                target_->DrawLine(D2D1::Point2F(left + 3.0f * scale, y),
+                                  D2D1::Point2F(right - 3.0f * scale, y),
+                                  accentBrush_.Get(), stroke);
+            }
+        }
+        accentBrush_->SetOpacity(1.0f);
+    }
+
+    void DrawPageChevron(D2D1_POINT_2F center, int direction,
+                         ID2D1Brush* brush, float scale) {
+        if (!brush) {
+            return;
+        }
+        const float tipX = center.x + direction * 3.0f * scale;
+        const float tailX = center.x - direction * 2.0f * scale;
+        const float halfHeight = 4.0f * scale;
+        target_->DrawLine(D2D1::Point2F(tailX, center.y - halfHeight),
+                          D2D1::Point2F(tipX, center.y), brush, 1.7f * scale);
+        target_->DrawLine(D2D1::Point2F(tipX, center.y),
+                          D2D1::Point2F(tailX, center.y + halfHeight),
+                          brush, 1.7f * scale);
+    }
+
     // File Tray (#33): a shelf for files dragged onto the island. Rows are built
     // from the shared DrawCard primitive so the shelf matches every other
     // dashboard, with the real Explorer icon for each file.
@@ -8699,12 +9418,16 @@ class Renderer {
         const float rowH = FileTrayLayout::kRowHeight * scale;
         const float rowGap = FileTrayLayout::kRowGap * scale;
         const int capacity = FileTrayLayout::VisibleRowCapacity((rect.bottom - rect.top) / scale);
+        const int pageCount = ListPageCount(static_cast<int>(total),
+                                            (rect.bottom - rect.top) / scale);
+        const int page = ClampInt(g_fileTrayPage.load(), 0, pageCount - 1);
+        g_fileTrayPage = page;
+        const size_t firstItem = static_cast<size_t>(page * capacity);
 
-        // Newest first: the file just dropped is the one the user wants.
         int drawn = 0;
-        for (auto it = state.fileTrayItems.rbegin();
-             it != state.fileTrayItems.rend() && drawn < capacity; ++it, ++drawn) {
-            const FileTrayItem& item = *it;
+        for (; drawn < capacity && firstItem + static_cast<size_t>(drawn) < total; ++drawn) {
+            const size_t itemIndex = total - 1 - firstItem - static_cast<size_t>(drawn);
+            const FileTrayItem& item = state.fileTrayItems[itemIndex];
             const float rowTop = listTop + drawn * (rowH + rowGap);
             const D2D1_RECT_F row = D2D1::RectF(rect.left + padX, rowTop, rect.right - padX, rowTop + rowH);
 
@@ -8737,9 +9460,10 @@ class Renderer {
                 swprintf_s(sizeBuf, L"%llu B", static_cast<unsigned long long>(item.sizeBytes));
             }
 
-            const float sizeW = 66.0f * scale;
+            const float sizeW = 58.0f * scale;
+            const float actionW = FileTrayLayout::kActionWidth * scale;
             const D2D1_RECT_F nameRect = D2D1::RectF(row.left + 32.0f * scale, row.top,
-                                                      row.right - sizeW - 10.0f * scale, row.bottom);
+                                                      row.right - sizeW - actionW - 10.0f * scale, row.bottom);
             if (smallTextFormat_) {
                 smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 textBrush_->SetOpacity(0.94f);
@@ -8747,8 +9471,8 @@ class Renderer {
                                    smallTextFormat_.Get(), nameRect, textBrush_.Get(),
                                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
 
-                const D2D1_RECT_F sizeRect = D2D1::RectF(row.right - sizeW - 8.0f * scale, row.top,
-                                                          row.right - 10.0f * scale, row.bottom);
+                const D2D1_RECT_F sizeRect = D2D1::RectF(row.right - sizeW - actionW - 8.0f * scale, row.top,
+                                                          row.right - actionW - 6.0f * scale, row.bottom);
                 smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
                 mutedBrush_->SetOpacity(0.70f);
                 target_->DrawTextW(sizeBuf, static_cast<UINT32>(wcslen(sizeBuf)),
@@ -8757,18 +9481,181 @@ class Renderer {
                 smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                 smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
             }
+
+            const D2D1_RECT_F deleteRect = D2D1::RectF(
+                row.right - actionW, row.top, row.right, row.bottom);
+            textBrush_->SetOpacity(0.78f);
+            DrawTrashIcon(deleteRect, textBrush_.Get(), scale);
         }
 
-        // "+N more" when the shelf holds more than fits.
-        if (static_cast<int>(total) > capacity && smallTextFormat_) {
-            wchar_t moreBuf[32] = {};
-            swprintf_s(moreBuf, L"+%d", static_cast<int>(total) - capacity);
-            const D2D1_RECT_F moreRect = D2D1::RectF(rect.left + padX, listBottom - 12.0f * scale,
-                                                      rect.right - padX, listBottom);
+        if (smallTextFormat_) {
+            const float centerX = (rect.left + rect.right) * 0.5f;
+            const float buttonY = rect.bottom - FileTrayLayout::kPageButtonYInset * scale;
+            const float spacing = FileTrayLayout::kPageButtonSpacing * scale;
+            for (int direction : {-1, 1}) {
+                const bool enabled = direction < 0 ? page > 0 : page + 1 < pageCount;
+                const D2D1_POINT_2F center = D2D1::Point2F(
+                    centerX + direction * spacing, buttonY);
+                ComPtr<ID2D1SolidColorBrush> buttonBrush;
+                target_->CreateSolidColorBrush(
+                    WithAlpha(material_.textPrimary, (enabled ? 0.20f : 0.08f) * settingsOpacity_),
+                    &buttonBrush);
+                if (buttonBrush) {
+                    target_->FillEllipse(D2D1::Ellipse(center, 10.0f * scale, 10.0f * scale),
+                                         buttonBrush.Get());
+                }
+                mutedBrush_->SetOpacity(enabled ? 0.90f : 0.35f);
+                DrawPageChevron(center, direction, mutedBrush_.Get(), scale);
+            }
+            wchar_t pageText[24] = {};
+            swprintf_s(pageText, L"%d / %d", page + 1, pageCount);
+            const D2D1_RECT_F pageRect = D2D1::RectF(
+                centerX - 24.0f * scale, buttonY - 10.0f * scale,
+                centerX + 24.0f * scale, buttonY + 10.0f * scale);
+            mutedBrush_->SetOpacity(0.70f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            target_->DrawTextW(pageText, static_cast<UINT32>(wcslen(pageText)),
+                               smallTextFormat_.Get(), pageRect, mutedBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_NONE);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+
+        textBrush_->SetOpacity(0.96f);
+        mutedBrush_->SetOpacity(0.75f);
+    }
+
+    void DrawClipboardHistoryDashboard(const SharedState& state, D2D1_RECT_F rect,
+                                       float scale) {
+        const float padX = FileTrayLayout::kPadX * scale;
+        const D2D1_RECT_F headerRect = D2D1::RectF(
+            rect.left + padX, rect.top + 18.0f * scale,
+            rect.right - padX, rect.top + 38.0f * scale);
+        textBrush_->SetOpacity(0.96f);
+        if (boldTextFormat_) {
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            const wchar_t* title = Loc(L"Clipboard");
+            target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)),
+                               boldTextFormat_.Get(), headerRect, textBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_NONE);
+            boldTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        const auto& clipboardItems = *state.clipboardHistory;
+        const size_t total = clipboardItems.size();
+        const bool copiedRecently = g_clipboardCopiedUntil.load(
+            std::memory_order_relaxed) > NowSeconds();
+        if ((total > 0 || copiedRecently) && smallTextFormat_) {
+            std::wstring countText;
+            if (copiedRecently) {
+                countText = Loc(L"Copied");
+                countText += L"!";
+            } else {
+                wchar_t countBuf[48] = {};
+                swprintf_s(countBuf, L"%zu %s", total,
+                           Loc(total == 1 ? L"item" : L"items"));
+                countText = countBuf;
+            }
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-            mutedBrush_->SetOpacity(0.65f);
-            target_->DrawTextW(moreBuf, static_cast<UINT32>(wcslen(moreBuf)), smallTextFormat_.Get(),
-                               moreRect, mutedBrush_.Get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            mutedBrush_->SetOpacity(0.75f);
+            target_->DrawTextW(countText.c_str(), static_cast<UINT32>(countText.size()),
+                               smallTextFormat_.Get(), headerRect, mutedBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_NONE);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
+
+        if (total == 0) {
+            if (textFormat_) {
+                const D2D1_RECT_F emptyRect = D2D1::RectF(
+                    rect.left + padX, rect.top + FileTrayLayout::kListTop * scale,
+                    rect.right - padX,
+                    rect.bottom - FileTrayLayout::kListBottomInset * scale);
+                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                mutedBrush_->SetOpacity(0.80f);
+                const wchar_t* hint = Loc(L"Clipboard is empty");
+                target_->DrawTextW(hint, static_cast<UINT32>(wcslen(hint)),
+                                   textFormat_.Get(), emptyRect, mutedBrush_.Get(),
+                                   D2D1_DRAW_TEXT_OPTIONS_NONE);
+                textFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
+            mutedBrush_->SetOpacity(0.75f);
+            return;
+        }
+
+        const float rowH = FileTrayLayout::kRowHeight * scale;
+        const float rowGap = FileTrayLayout::kRowGap * scale;
+        const float listTop = rect.top + FileTrayLayout::kListTop * scale;
+        const int capacity = FileTrayLayout::VisibleRowCapacity(
+            (rect.bottom - rect.top) / scale);
+        const int pageCount = ListPageCount(static_cast<int>(total),
+                                            (rect.bottom - rect.top) / scale);
+        const int page = ClampInt(g_clipboardHistoryPage.load(), 0, pageCount - 1);
+        g_clipboardHistoryPage = page;
+        const size_t firstItem = static_cast<size_t>(page * capacity);
+        const int rows = std::min<int>(capacity, static_cast<int>(total) -
+                                                 static_cast<int>(firstItem));
+
+        for (int rowIndex = 0; rowIndex < rows; ++rowIndex) {
+            const size_t itemIndex = total - 1 - firstItem - static_cast<size_t>(rowIndex);
+            const ClipboardHistoryItem& item = clipboardItems[itemIndex];
+            const float rowTop = listTop + rowIndex * (rowH + rowGap);
+            const D2D1_RECT_F row = D2D1::RectF(
+                rect.left + padX, rowTop, rect.right - padX, rowTop + rowH);
+            const bool hovered = g_hoveredClipboardHistoryRow.load(
+                                     std::memory_order_relaxed) == rowIndex;
+            DrawCard(row, 9.0f * scale, hovered);
+
+            const D2D1_RECT_F iconRect = D2D1::RectF(
+                row.left + 8.0f * scale, row.top + 5.0f * scale,
+                row.left + 26.0f * scale, row.bottom - 5.0f * scale);
+            DrawClipboardItemIcon(iconRect, item.image, scale);
+
+            const float actionW = FileTrayLayout::kActionWidth * scale;
+            const D2D1_RECT_F textRect = D2D1::RectF(
+                row.left + 32.0f * scale, row.top,
+                row.right - actionW - 8.0f * scale, row.bottom);
+            if (smallTextFormat_) {
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                textBrush_->SetOpacity(0.94f);
+                target_->DrawTextW(item.text.c_str(), static_cast<UINT32>(item.text.size()),
+                                   smallTextFormat_.Get(), textRect, textBrush_.Get(),
+                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                smallTextFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            }
+            const D2D1_RECT_F deleteRect = D2D1::RectF(
+                row.right - actionW, row.top, row.right, row.bottom);
+            textBrush_->SetOpacity(0.78f);
+            DrawTrashIcon(deleteRect, textBrush_.Get(), scale);
+        }
+
+        if (smallTextFormat_) {
+            const float centerX = (rect.left + rect.right) * 0.5f;
+            const float buttonY = rect.bottom - FileTrayLayout::kPageButtonYInset * scale;
+            const float spacing = FileTrayLayout::kPageButtonSpacing * scale;
+            for (int direction : {-1, 1}) {
+                const bool enabled = direction < 0 ? page > 0 : page + 1 < pageCount;
+                const D2D1_POINT_2F center = D2D1::Point2F(
+                    centerX + direction * spacing, buttonY);
+                ComPtr<ID2D1SolidColorBrush> buttonBrush;
+                target_->CreateSolidColorBrush(
+                    WithAlpha(material_.textPrimary, (enabled ? 0.20f : 0.08f) * settingsOpacity_),
+                    &buttonBrush);
+                if (buttonBrush) {
+                    target_->FillEllipse(D2D1::Ellipse(center, 10.0f * scale, 10.0f * scale),
+                                         buttonBrush.Get());
+                }
+                mutedBrush_->SetOpacity(enabled ? 0.90f : 0.35f);
+                DrawPageChevron(center, direction, mutedBrush_.Get(), scale);
+            }
+            wchar_t pageText[24] = {};
+            swprintf_s(pageText, L"%d / %d", page + 1, pageCount);
+            const D2D1_RECT_F pageRect = D2D1::RectF(
+                centerX - 24.0f * scale, buttonY - 10.0f * scale,
+                centerX + 24.0f * scale, buttonY + 10.0f * scale);
+            mutedBrush_->SetOpacity(0.70f);
+            smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            target_->DrawTextW(pageText, static_cast<UINT32>(wcslen(pageText)),
+                               smallTextFormat_.Get(), pageRect, mutedBrush_.Get(),
+                               D2D1_DRAW_TEXT_OPTIONS_NONE);
             smallTextFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         }
 
@@ -9238,13 +10125,14 @@ class Renderer {
                                    dashFadeLayer.Get());
             }
 
-            // Expanded Mode. Order must match ActiveTabCount()/FileTrayTabIndex().
+            // Tab order must match the shared indices used by input handlers.
             std::vector<int> activeTabs;
             activeTabs.push_back(3); // Time (shown first when the island expands/on hover)
+            if (settings.clipboard) activeTabs.push_back(5);
+            if (settings.fileTrayModule) activeTabs.push_back(4);
             activeTabs.push_back(0); // Calendar
             if (settings.weather) activeTabs.push_back(1);
             if (settings.hardwareMonitorModule) activeTabs.push_back(2);
-            if (settings.fileTrayModule) activeTabs.push_back(4);
 
             int maxTabs = static_cast<int>(activeTabs.size());
             int tabIdx = NormalizedTabIndex(settings);
@@ -9256,6 +10144,7 @@ class Renderer {
             else if (activeTabId == 1) DrawWeatherDashboard(state, rect, settings, now, scale, hasWeather, wIcon, wText);
             else if (activeTabId == 2) DrawHardwareMonitorDashboard(state, rect, settings, scale);
             else if (activeTabId == 4) DrawFileTrayDashboard(state, rect, settings, scale);
+            else if (activeTabId == 5) DrawClipboardHistoryDashboard(state, rect, scale);
 
             // Pagination dots (Vertical on the right edge)
             if (maxTabs > 1) {
@@ -9525,13 +10414,14 @@ class Renderer {
         if (expandedAlpha > 0.01f && mask && layer) {
             target_->PushLayer(D2D1::LayerParameters(rect, mask.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), expandedAlpha, nullptr, D2D1_LAYER_OPTIONS_NONE), layer.Get());
 
-            // Order must match ActiveTabCount()/FileTrayTabIndex().
+            // Tab order must match the shared indices used by input handlers.
             std::vector<int> activeTabs;
             activeTabs.push_back(0); // Media
+            if (settings.clipboard) activeTabs.push_back(5);
+            if (settings.fileTrayModule) activeTabs.push_back(4);
             activeTabs.push_back(1); // Calendar
             if (settings.weather) activeTabs.push_back(2);
             if (settings.hardwareMonitorModule) activeTabs.push_back(3);
-            if (settings.fileTrayModule) activeTabs.push_back(4);
 
             // Same settings object as the list above, so the index can't be
             // normalised against a tab set that no longer matches.
@@ -9710,6 +10600,8 @@ class Renderer {
                 DrawHardwareMonitorDashboard(state, rect, settings, 1.0f);
             } else if (activeTabId == 4) {
                 DrawFileTrayDashboard(state, rect, settings, 1.0f);
+            } else if (activeTabId == 5) {
+                DrawClipboardHistoryDashboard(state, rect, 1.0f);
             }
 
             // Pagination dots (Vertical on the right edge)
@@ -11308,6 +12200,10 @@ DWORD WINAPI MouseThreadProc(void*) {
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static POINT s_touchStart = {0, 0};
     static ULONGLONG s_touchStartTime = 0;
+    static int s_fileTrayDragItemIndex = -1;
+    static int s_pressedFileTrayDeleteIndex = -1;
+    static int s_pressedClipboardIndex = -1;
+    static ClipboardRowAction s_pressedClipboardAction = ClipboardRowAction::None;
     switch (msg) {
         case WM_CREATE:
             AddClipboardFormatListener(hwnd);
@@ -11321,7 +12217,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_DROPFILES: {
             HDROP drop = reinterpret_cast<HDROP>(wParam);
-            if (!g_settings.fileTrayModule) {
+            const Settings settings = GetSettingsCopy();
+            if (!settings.fileTrayModule) {
                 DragFinish(drop);
                 return 0;
             }
@@ -11378,14 +12275,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_state.fileTrayItems.push_back(std::move(item));
                 }
 
-                const size_t cap = static_cast<size_t>(std::max(1, g_settings.fileTrayMaxItems));
+                const size_t cap = static_cast<size_t>(std::max(1, settings.fileTrayMaxItems));
                 while (g_state.fileTrayItems.size() > cap) {
                     g_state.fileTrayItems.erase(g_state.fileTrayItems.begin());
                 }
             }
+            std::vector<FileTrayItem> filesToPersist;
+            {
+                std::lock_guard lock(g_stateMutex);
+                filesToPersist = g_state.fileTrayItems;
+            }
+            PersistFileTrayItems(filesToPersist);
+            g_fileTrayPage = 0;
+            g_hoveredFileTrayRow = -1;
 
             // Jump to the shelf so the drop is visibly acknowledged.
-            const int trayTab = FileTrayTabIndex(g_settings);
+            const int trayTab = FileTrayTabIndex(settings);
             if (trayTab >= 0) {
                 g_idleTab = trayTab;
             }
@@ -11545,10 +12450,40 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
 
                 // A File Tray row under the cursor is clickable (opens the file).
-                if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings) &&
-                    g_hoveredFileTrayRow.load(std::memory_order_relaxed) >= 0) {
-                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
-                    return TRUE;
+                if (g_settings.fileTrayModule &&
+                    currentTab == FileTrayTabIndex(g_settings)) {
+                    const MediaContentPoint cp = MediaContentFromClient(pt.x, pt.y);
+                    size_t count = 0;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        count = g_state.fileTrayItems.size();
+                    }
+                    const int page = g_fileTrayPage.load(std::memory_order_relaxed);
+                    if (FileTrayRowAtContentPoint(cp, static_cast<int>(count), page) >= 0 ||
+                        std::abs(ListPageButtonAtContentPoint(
+                            cp, static_cast<int>(count), page)) == 1) {
+                        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                        return TRUE;
+                    }
+                }
+                if (g_settings.clipboard &&
+                    currentTab == ClipboardHistoryTabIndex(g_settings)) {
+                    const MediaContentPoint cp = MediaContentFromClient(pt.x, pt.y);
+                    size_t count = 0;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        count = g_state.clipboardHistory->size();
+                    }
+                    if (ClipboardRowActionAtContentPoint(
+                            cp, static_cast<int>(count),
+                            g_clipboardHistoryPage.load(std::memory_order_relaxed)) !=
+                            ClipboardRowAction::None ||
+                        std::abs(ListPageButtonAtContentPoint(
+                            cp, static_cast<int>(count),
+                            g_clipboardHistoryPage.load(std::memory_order_relaxed))) == 1) {
+                        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                        return TRUE;
+                    }
                 }
             }
             break;
@@ -11594,17 +12529,71 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // File Tray: record the press so WM_MOUSEMOVE can detect a drag gesture.
                 if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings)) {
                     const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+                    const int page = g_fileTrayPage.load(std::memory_order_relaxed);
                     size_t trayCount = 0;
                     {
                         std::lock_guard lock(g_stateMutex);
                         trayCount = g_state.fileTrayItems.size();
                     }
-                    const int row = FileTrayRowAtContentPoint(cp, static_cast<int>(trayCount));
+                    const int pageAction = ListPageButtonAtContentPoint(
+                        cp, static_cast<int>(trayCount), page);
+                    if (pageAction != 0) {
+                        if (pageAction == -1 || pageAction == 1) {
+                            g_fileTrayPage = page + pageAction;
+                            g_layoutDirty = true;
+                        }
+                        return 0;
+                    }
+                    const int row = FileTrayRowAtContentPoint(
+                        cp, static_cast<int>(trayCount), page);
                     if (row >= 0) {
+                        const float actionStart =
+                            cp.width - FileTrayLayout::kPadX - FileTrayLayout::kActionWidth;
+                        if (cp.x >= actionStart) {
+                            const int capacity = FileTrayLayout::VisibleRowCapacity(cp.height);
+                            s_pressedFileTrayDeleteIndex = static_cast<int>(
+                                NewestFirstItemIndex(trayCount, page, row, capacity));
+                            SetCapture(hwnd);
+                            return 0;
+                        }
                         g_fileTrayDragRow = row;
+                        s_fileTrayDragItemIndex = static_cast<int>(
+                            NewestFirstItemIndex(trayCount, page, row,
+                                FileTrayLayout::VisibleRowCapacity(cp.height)));
                         g_fileTrayDragStartX = xPos;
                         g_fileTrayDragStartY = yPos;
                         g_fileTrayDidDrag = false;
+                        SetCapture(hwnd);
+                        return 0;
+                    }
+                }
+
+                if (g_settings.clipboard &&
+                    currentTab == ClipboardHistoryTabIndex(g_settings)) {
+                    const MediaContentPoint cp = MediaContentFromClient(xPos, yPos);
+                    const int page = g_clipboardHistoryPage.load(std::memory_order_relaxed);
+                    size_t count = 0;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        count = g_state.clipboardHistory->size();
+                    }
+                    const int pageAction = ListPageButtonAtContentPoint(
+                        cp, static_cast<int>(count), page);
+                    if (pageAction != 0) {
+                        if (pageAction == -1 || pageAction == 1) {
+                            g_clipboardHistoryPage = page + pageAction;
+                            g_layoutDirty = true;
+                        }
+                        return 0;
+                    }
+                    const ClipboardRowAction rowAction =
+                        ClipboardRowActionAtContentPoint(cp, static_cast<int>(count), page);
+                    if (rowAction != ClipboardRowAction::None) {
+                        const int row = ListRowAtContentPoint(cp, static_cast<int>(count), page);
+                        const int capacity = FileTrayLayout::VisibleRowCapacity(cp.height);
+                        s_pressedClipboardIndex = static_cast<int>(
+                            NewestFirstItemIndex(count, page, row, capacity));
+                        s_pressedClipboardAction = rowAction;
                         SetCapture(hwnd);
                         return 0;
                     }
@@ -11660,9 +12649,10 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     {
                         std::lock_guard lock(g_stateMutex);
                         const size_t count = g_state.fileTrayItems.size();
-                        if (dragRow < static_cast<int>(count)) {
-                            const size_t index = count - 1 - static_cast<size_t>(dragRow);
-                            filePath = g_state.fileTrayItems[index].path;
+                        if (s_fileTrayDragItemIndex >= 0 &&
+                            s_fileTrayDragItemIndex < static_cast<int>(count)) {
+                            filePath = g_state.fileTrayItems[
+                                s_fileTrayDragItemIndex].path;
                         }
                     }
 
@@ -11672,6 +12662,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
 
                     g_fileTrayDragRow = -1;
+                    s_fileTrayDragItemIndex = -1;
                     g_fileTrayDidDrag = false;
                     g_layoutDirty = true;
                     return 0;
@@ -11696,16 +12687,33 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             // File Tray row highlight.
             int hoveredRow = -1;
+            int hoveredClipboardRow = -1;
+            const MediaContentPoint contentPoint = MediaContentFromClient(xPos, yPos);
             if (g_settings.fileTrayModule && currentTab == FileTrayTabIndex(g_settings)) {
                 size_t trayCount = 0;
                 {
                     std::lock_guard lock(g_stateMutex);
                     trayCount = g_state.fileTrayItems.size();
                 }
-                hoveredRow = FileTrayRowAtContentPoint(MediaContentFromClient(xPos, yPos),
-                                                       static_cast<int>(trayCount));
+                hoveredRow = FileTrayRowAtContentPoint(
+                    contentPoint, static_cast<int>(trayCount),
+                    g_fileTrayPage.load(std::memory_order_relaxed));
+            } else if (g_settings.clipboard &&
+                       currentTab == ClipboardHistoryTabIndex(g_settings)) {
+                size_t clipboardCount = 0;
+                {
+                    std::lock_guard lock(g_stateMutex);
+                    clipboardCount = g_state.clipboardHistory->size();
+                }
+                hoveredClipboardRow = ListRowAtContentPoint(
+                    contentPoint, static_cast<int>(clipboardCount),
+                    g_clipboardHistoryPage.load(std::memory_order_relaxed));
             }
             if (g_hoveredFileTrayRow.exchange(hoveredRow) != hoveredRow) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredClipboardHistoryRow.exchange(hoveredClipboardRow) !=
+                hoveredClipboardRow) {
                 g_layoutDirty = true;
             }
             return 0;
@@ -11713,6 +12721,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_MOUSELEAVE:
             if (g_hoveredMediaButton.exchange(-1) != -1) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredFileTrayRow.exchange(-1) != -1) {
+                g_layoutDirty = true;
+            }
+            if (g_hoveredClipboardHistoryRow.exchange(-1) != -1) {
                 g_layoutDirty = true;
             }
             return 0;
@@ -11729,7 +12743,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_layoutDirty = true;
                 }
                 g_fileTrayDragRow = -1;
+                s_fileTrayDragItemIndex = -1;
                 g_fileTrayDidDrag = false;
+                s_pressedFileTrayDeleteIndex = -1;
+                s_pressedClipboardIndex = -1;
+                s_pressedClipboardAction = ClipboardRowAction::None;
             }
             return 0;
 
@@ -11762,8 +12780,106 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_layoutDirty = true;
                 }
 
+                if (s_pressedFileTrayDeleteIndex >= 0) {
+                    const int itemIndex = std::exchange(s_pressedFileTrayDeleteIndex, -1);
+                    ReleaseCapture();
+                    const MediaContentPoint cp = MediaContentFromClient(
+                        GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                    const int page = g_fileTrayPage.load(std::memory_order_relaxed);
+                    std::vector<FileTrayItem> files;
+                    bool releasedOnSameButton = false;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        const size_t count = g_state.fileTrayItems.size();
+                        const int row = FileTrayRowAtContentPoint(
+                            cp, static_cast<int>(count), page);
+                        const int capacity = FileTrayLayout::VisibleRowCapacity(cp.height);
+                        const float actionStart =
+                            cp.width - FileTrayLayout::kPadX - FileTrayLayout::kActionWidth;
+                        releasedOnSameButton = row >= 0 && cp.x >= actionStart &&
+                            NewestFirstItemIndex(count, page, row, capacity) ==
+                                static_cast<size_t>(itemIndex);
+                        if (releasedOnSameButton &&
+                            itemIndex < static_cast<int>(count)) {
+                            g_state.fileTrayItems.erase(
+                                g_state.fileTrayItems.begin() + itemIndex);
+                        }
+                        files = g_state.fileTrayItems;
+                    }
+                    if (releasedOnSameButton) {
+                        PersistFileTrayItems(files);
+                        g_fileTrayPage = std::min(
+                            page,
+                            ListPageCount(static_cast<int>(files.size()), cp.height) - 1);
+                        g_hoveredFileTrayRow = -1;
+                        g_layoutDirty = true;
+                    }
+                    return 0;
+                }
+
+                if (s_pressedClipboardIndex >= 0) {
+                    const int itemIndex = std::exchange(s_pressedClipboardIndex, -1);
+                    const ClipboardRowAction action = std::exchange(
+                        s_pressedClipboardAction, ClipboardRowAction::None);
+                    ReleaseCapture();
+                    const MediaContentPoint cp = MediaContentFromClient(
+                        GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+                    const int page = g_clipboardHistoryPage.load(
+                        std::memory_order_relaxed);
+
+                    ClipboardHistoryItem item;
+                    std::shared_ptr<const std::vector<ClipboardHistoryItem>> items;
+                    bool haveItem = false;
+                    bool releasedOnSameButton = false;
+                    {
+                        std::lock_guard lock(g_stateMutex);
+                        const auto& currentItems = *g_state.clipboardHistory;
+                        const size_t count = currentItems.size();
+                        const ClipboardRowAction actualReleaseAction =
+                            ClipboardRowActionAtContentPoint(
+                                cp, static_cast<int>(count), page);
+                        const int row = ListRowAtContentPoint(
+                            cp, static_cast<int>(count), page);
+                        const int capacity = FileTrayLayout::VisibleRowCapacity(cp.height);
+                        releasedOnSameButton = actualReleaseAction == action && row >= 0 &&
+                            NewestFirstItemIndex(count, page, row, capacity) ==
+                                static_cast<size_t>(itemIndex);
+                        if (releasedOnSameButton &&
+                            itemIndex < static_cast<int>(count)) {
+                            item = currentItems[itemIndex];
+                            haveItem = true;
+                            if (action == ClipboardRowAction::Delete) {
+                                auto updatedItems =
+                                    std::make_shared<std::vector<ClipboardHistoryItem>>(
+                                        currentItems);
+                                updatedItems->erase(updatedItems->begin() + itemIndex);
+                                g_state.clipboardHistory = updatedItems;
+                                items = std::move(updatedItems);
+                            }
+                        }
+                    }
+
+                    if (haveItem && releasedOnSameButton &&
+                        action == ClipboardRowAction::Copy) {
+                        if (CopyClipboardHistoryItemToClipboard(hwnd, item)) {
+                            g_clipboardCopiedUntil = NowSeconds() + 2.0;
+                            g_layoutDirty = true;
+                        }
+                    } else if (haveItem && releasedOnSameButton &&
+                               action == ClipboardRowAction::Delete) {
+                        PersistClipboardHistory(*items);
+                        g_clipboardHistoryPage = std::min(
+                            page,
+                            ListPageCount(static_cast<int>(items->size()), cp.height) - 1);
+                        g_hoveredClipboardHistoryRow = -1;
+                        g_layoutDirty = true;
+                    }
+                    return 0;
+                }
+
                 if (g_fileTrayDragRow.load() >= 0) {
                     const int clickedRow = g_fileTrayDragRow.exchange(-1);
+                    const int clickedItemIndex = std::exchange(s_fileTrayDragItemIndex, -1);
                     ReleaseCapture();
                     const bool didDrag = g_fileTrayDidDrag.exchange(false);
                     if (!didDrag && clickedRow >= 0) {
@@ -11771,9 +12887,9 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         {
                             std::lock_guard lock(g_stateMutex);
                             const size_t count = g_state.fileTrayItems.size();
-                            if (clickedRow < static_cast<int>(count)) {
-                                const size_t index = count - 1 - static_cast<size_t>(clickedRow);
-                                toOpen = g_state.fileTrayItems[index].path;
+                            if (clickedItemIndex >= 0 &&
+                                clickedItemIndex < static_cast<int>(count)) {
+                                toOpen = g_state.fileTrayItems[clickedItemIndex].path;
                             }
                         }
                         if (!toOpen.empty()) {
@@ -11840,11 +12956,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     std::wstring toOpen;
                     {
                         std::lock_guard lock(g_stateMutex);
+                        const int page = g_fileTrayPage.load(std::memory_order_relaxed);
+                        const int capacity = FileTrayLayout::VisibleRowCapacity(cp.height);
                         const int row = FileTrayRowAtContentPoint(
-                            cp, static_cast<int>(g_state.fileTrayItems.size()));
+                            cp, static_cast<int>(g_state.fileTrayItems.size()), page);
                         if (row >= 0) {
-                            // Rows render newest-first, so map back from the end.
-                            const size_t index = g_state.fileTrayItems.size() - 1 - static_cast<size_t>(row);
+                            const size_t index = NewestFirstItemIndex(
+                                g_state.fileTrayItems.size(), page, row, capacity);
                             toOpen = g_state.fileTrayItems[index].path;
                         }
                     }
@@ -12335,6 +13453,14 @@ DWORD WINAPI RenderThreadProc(void*) {
         }
 
         bool needsRender = false;
+
+        static bool previousClipboardCopied = false;
+        const bool clipboardCopied =
+            g_clipboardCopiedUntil.load(std::memory_order_relaxed) > now;
+        if (clipboardCopied != previousClipboardCopied) {
+            previousClipboardCopied = clipboardCopied;
+            needsRender = true;
+        }
 
         if (!hover && g_clickExpanded.load()) {
             g_clickExpanded = false;
@@ -13006,6 +14132,9 @@ void StopThreads() {
 
 BOOL WhTool_ModInit() {
     LoadSettings();
+    if (!LoadPersistentLists()) {
+        Wh_Log(L"Some persisted File Tray or Clipboard history entries could not be loaded.");
+    }
 
     if (!StartThreads()) {
         StopThreads();
@@ -13019,6 +14148,7 @@ BOOL WhTool_ModInit() {
 
 void WhTool_ModSettingsChanged() {
     LoadSettings();
+    EnforceFileTrayCapacity();
 }
 
 void WhTool_ModUninit() {
